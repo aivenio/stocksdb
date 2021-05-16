@@ -5,8 +5,6 @@ An enduser are free to check and understand the data source used for
 building the database and reference the same for further analysis. The
 table is created to keep track of the data source, associated plans,
 scheduler information, etc.
-
-Copyright © [2021] Debmalya Pramanik (ZenithClown), AivenIO DBA
 ********************************************************************/
 
 CREATE TABLE IF NOT EXISTS private.data_source_mw (
