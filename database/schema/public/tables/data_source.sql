@@ -7,7 +7,7 @@ table is created to keep track of the data source, associated plans,
 scheduler information, etc.
 ********************************************************************/
 
-CREATE TABLE IF NOT EXISTS private.data_source_mw (
+CREATE TABLE IF NOT EXISTS public.data_source_mw (
     data_source_id
         CHAR(5)
         CONSTRAINT pk_data_source_id PRIMARY KEY,
