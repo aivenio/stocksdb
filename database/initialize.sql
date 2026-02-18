@@ -20,3 +20,4 @@ SQL Table Schema Execution Order - STRICT Follow
 ********************************************************************/
 
 \i database/schema/common/initialize.sql
+\i database/schema/public/initialize.sql
