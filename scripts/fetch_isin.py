@@ -9,9 +9,12 @@ CDSL (Central Securities Depository Limited) exchange. Information
 is available at https://nsdl.co.in/master_search.php.
 """
 
+import os
+
 from tqdm import tqdm as TQ
 
 import pandas as pd
+import sqlalchemy as sa
 
 def fetch_isin(
         url : str,
@@ -91,6 +94,9 @@ def fetch_isin(
     # ! Assert data quality, raises assertion error on fail
     assert data[primary_key_column].nunique() == data.shape[0], \
         f"Primary key {primary_key_column} cannot have a duplicate value."
+    
+    # ? add data source information
+    data["isin_data_source_id"] = "ISIN0"
 
     return data
 
@@ -108,4 +114,27 @@ if __name__ == "__main__":
         )
     )
 
-    data.to_excel("ISIN.xlsx", index = False)
+    # get configurations for database connection elements, and build
+    DATABASE = os.environ["AIVENIO_STOCKSDB_DATABASE"]
+    HOSTNAME = os.environ["AIVENIO_STOCKSDB_HOSTNAME"]
+    PASSWORD = os.environ["AIVENIO_STOCKSDB_PASSWORD"]
+    PORTNAME = os.environ["AIVENIO_STOCKSDB_PORTNAME"]
+    USERNAME = os.environ["AIVENIO_STOCKSDB_USERNAME"]
+
+    engine = sa.create_engine(
+        f"postgresql+psycopg://{USERNAME}:{PASSWORD}@{HOSTNAME}:{PORTNAME}/{DATABASE}"
+    )
+
+    try:
+        engine.connect()
+    except Exception as err:
+        raise ValueError("Host is not reachable.")
+
+    with engine.connect() as connection:
+        metadata = sa.Table(
+            "securities_mw", sa.MetaData(schema = "common"),
+            autoload_with = connection
+        )
+
+        connection.execute(metadata.insert(), data.to_dict(orient = "records"))
+        connection.commit()
