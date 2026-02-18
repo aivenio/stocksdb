@@ -31,4 +31,20 @@ changelogs are provided in the detail pane, while the version wise note is as av
 
 </details><br>
 
+### Barbarian Overlord `v0` Release
+
+We're pleased to announce that the PostgreSQL database management to track, take data driven trading actions and much more
+using the stock data is made public. The **`v0`** is an experimental release to check feasibility and compatibility with
+other existing models.
+
+#### v0.0.1 | 2026-02-19
+
+Establish a basic database schema with minimal information, but provides scripts to update data mainly for the ISIN codes of
+securities listed in the NSDL (India) website. The following features are available:
+
+  * ✨ The data uses a *subscription model* to sync data across a single source of truth, check
+    [aivenio/macrodb](https://github.com/aivenio/macrodb/tree/master) for more details.
+  * ✨ A minimial skeleton is provided with Python script and GitHub Action to fetch ISIN code from NSDL website, check
+    the script file for more information.
+
 </div>
