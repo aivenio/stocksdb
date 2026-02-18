@@ -1,0 +1,59 @@
+name: Schedule ISIN Data Update
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository Content
+        uses: actions/checkout@v6
+
+      - name: Setup Python v6
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python & Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Data Scheduler Python Script
+        continue-on-error: true
+        env:
+          AIVENIO_STOCKSDB_DATABASE: ${{ secrets.AIVENIO_STOCKSDB_DATABASE }}
+          AIVENIO_STOCKSDB_HOSTNAME: ${{ secrets.AIVENIO_STOCKSDB_HOSTNAME }}
+          AIVENIO_STOCKSDB_PASSWORD: ${{ secrets.AIVENIO_STOCKSDB_PASSWORD }}
+          AIVENIO_STOCKSDB_PORTNAME: ${{ secrets.AIVENIO_STOCKSDB_PORTNAME }}
+          AIVENIO_STOCKSDB_USERNAME: ${{ secrets.AIVENIO_STOCKSDB_USERNAME }}
+        run: |
+          echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting to Execute..." >> status.log;
+
+          python scripts/fetch_isin.py || {
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Failed to Execute..." >> status.log;
+          }
+
+      - name: Commit Logs to the New File
+        run: |
+          git config --local user.name "GitHub Action"
+          git config --local user.email "action@github.com"
+
+          if ! git diff --quiet HEAD -- status.log; then
+            echo "Writing changes, adding new commit."
+            git add status.log
+            git commit -am "📝 Executed Data Scheduler to Fetch ISIN" --allow-empty
+          else
+            echo "No changes in current, no commit is made."
+          fi
+
+      - name: Push Changes to the Branch
+        uses: ad-m/github-push-action@v1.0.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: master
