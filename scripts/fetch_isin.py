@@ -14,7 +14,8 @@ import os
 from tqdm import tqdm as TQ
 
 import pandas as pd
-import sqlalchemy as sa
+
+from db_connection import create_engine, insert_data
 
 def fetch_isin(
         url : str,
@@ -113,28 +114,8 @@ if __name__ == "__main__":
             "current_status"
         )
     )
+    
+    engine = create_engine()
+    insert_data(engine, data, "securities_mw", schema = "common")
 
-    # get configurations for database connection elements, and build
-    DATABASE = os.environ["AIVENIO_STOCKSDB_DATABASE"]
-    HOSTNAME = os.environ["AIVENIO_STOCKSDB_HOSTNAME"]
-    PASSWORD = os.environ["AIVENIO_STOCKSDB_PASSWORD"]
-    PORTNAME = os.environ["AIVENIO_STOCKSDB_PORTNAME"]
-    USERNAME = os.environ["AIVENIO_STOCKSDB_USERNAME"]
-
-    engine = sa.create_engine(
-        f"postgresql+psycopg://{USERNAME}:{PASSWORD}@{HOSTNAME}:{PORTNAME}/{DATABASE}"
-    )
-
-    try:
-        engine.connect()
-    except Exception as err:
-        raise ValueError("Host is not reachable.")
-
-    with engine.connect() as connection:
-        metadata = sa.Table(
-            "securities_mw", sa.MetaData(schema = "common"),
-            autoload_with = connection
-        )
-
-        connection.execute(metadata.insert(), data.to_dict(orient = "records"))
-        connection.commit()
+    engine.dispose()
