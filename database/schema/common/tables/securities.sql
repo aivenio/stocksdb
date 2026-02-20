@@ -33,3 +33,40 @@ CREATE TABLE IF NOT EXISTS common.securities_mw (
             ON UPDATE CASCADE
             ON DELETE RESTRICT
 );
+
+
+CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
+    securities_exchange_symbol_id
+        INTEGER GENERATED ALWAYS AS IDENTITY
+        CONSTRAINT pk_securities_exchange_symbol_id PRIMARY KEY,
+
+    security_isin_code
+        CHAR(12) NOT NULL
+        CONSTRAINT fk_security_isin_code_symbol
+            REFERENCES common.securities_mw(security_isin_code)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+
+    market_identifier_code
+        CHAR(4) NOT NULL
+        CONSTRAINT fk_ses_market_identifier_code
+            REFERENCES common.stock_exchange_mw(market_identifier_code)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+
+    exchange_symbol
+        VARCHAR(32) NOT NULL,
+
+    date_of_incorporation
+        DATE NOT NULL DEFAULT '1900-01-01',
+
+    created_on
+        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_exchange_symbol UNIQUE(
+        security_isin_code
+        , market_identifier_code
+        , exchange_symbol
+        , date_of_incorporation
+    )
+);
