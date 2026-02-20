@@ -9,8 +9,6 @@ CDSL (Central Securities Depository Limited) exchange. Information
 is available at https://nsdl.co.in/master_search.php.
 """
 
-import os
-
 from tqdm import tqdm as TQ
 
 import pandas as pd
