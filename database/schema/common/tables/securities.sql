@@ -80,3 +80,37 @@ CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
         , exchange_symbol_name
     )
 );
+
+CREATE TABLE IF NOT EXISTS common.corporate_actions_mw (
+    corporate_actions_id
+        INTEGER GENERATED ALWAYS AS IDENTITY
+        CONSTRAINT pk_corporate_actions_id PRIMARY KEY,
+
+    security_isin_code
+        CHAR(12) NOT NULL
+        CONSTRAINT fk_security_isin_code_corp_action
+            REFERENCES common.securities_mw(security_isin_code)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+
+    corporate_actions_type
+        common.corporate_actions_type NOT NULL,
+
+    corporate_actions_date
+        DATE NOT NULL,
+
+    corporate_actions_description
+        VARCHAR(255),
+
+    actions_data_source
+        VARCHAR(255) NOT NULL,
+
+    created_on
+        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_corporate_actions UNIQUE(
+        security_isin_code
+        , corporate_actions_type
+        , corporate_actions_date
+    )
+);
