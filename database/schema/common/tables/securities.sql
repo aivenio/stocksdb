@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS common.securities_mw (
 
 
 CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
-    securities_exchange_symbol_id
+    ses_primary_id
         INTEGER GENERATED ALWAYS AS IDENTITY
         CONSTRAINT pk_securities_exchange_symbol_id PRIMARY KEY,
 
@@ -57,8 +57,18 @@ CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
     exchange_symbol
         VARCHAR(32) NOT NULL,
 
-    date_of_incorporation
-        DATE NOT NULL DEFAULT '1900-01-01',
+    exchange_symbol_name
+        VARCHAR(255) NOT NULL,
+
+    symbol_series_code
+        VARCHAR(16),
+
+    ses_data_source_id
+        CHAR(5) NOT NULL
+        CONSTRAINT fk_ses_data_source_id
+            REFERENCES public.data_source_mw(data_source_id)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
 
     created_on
         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -67,6 +77,6 @@ CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
         security_isin_code
         , market_identifier_code
         , exchange_symbol
-        , date_of_incorporation
+        , exchange_symbol_name
     )
 );
