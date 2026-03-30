@@ -100,6 +100,26 @@ def fetch_isin(
     return data
 
 
+def new_isin_code(
+        records : pd.DataFrame,
+        existing : pd.DataFrame
+    ) -> pd.DataFrame:
+    records = records[
+        records["security_isin_code"].isin(
+            [
+                isin for isin in TQ(
+                    records.security_isin_code.unique(),
+                    total = records.security_isin_code.nunique(),
+                    desc = "Calculating New ISIN Codes from File"
+                )
+                if isin not in existing.security_isin_code.unique()
+            ]
+        )
+    ]
+
+    return records
+
+
 if __name__ == "__main__":
     URI = "https://raw.githubusercontent.com/captn3m0/india-isin-data/refs/heads/main/ISIN.csv"
     data = fetch_isin(
@@ -114,6 +134,9 @@ if __name__ == "__main__":
     )
     
     engine = create_engine()
+    existing = pd.read_sql("SELECT * FROM common.securities_mw", engine)
+
+    data = new_isin_code(data, existing)
     insert_data(engine, data, "securities_mw", schema = "common")
 
     engine.dispose()

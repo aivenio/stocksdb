@@ -37,7 +37,7 @@ def create_engine(
 
 def insert_data(
         engine : sa.Engine,
-        data : pd.Dataframe,
+        data : pd.DataFrame,
         table : str,
         schema : str = "public"
     ) -> None:
