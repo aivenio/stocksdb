@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS common.securities_mw (
             ON DELETE RESTRICT
 );
 
+CREATE INDEX ix_securities_mw_security_issuer_type ON
+    common.securities_mw (security_issuer_type);
 
 CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
     ses_primary_id
@@ -80,6 +82,15 @@ CREATE TABLE IF NOT EXISTS common.securities_exchange_symbol_mw (
         , exchange_symbol_name
     )
 );
+
+CREATE INDEX ix_securities_exchange_symbol_mw_market_identifier_code ON
+    common.securities_exchange_symbol_mw (market_identifier_code);
+
+CREATE INDEX ix_securities_exchange_symbol_mw_symbol_series_code ON
+    common.securities_exchange_symbol_mw (symbol_series_code);
+
+CREATE INDEX ix_securities_exchange_symbol_mw_exchange_symbol ON
+    common.securities_exchange_symbol_mw (exchange_symbol);
 
 CREATE TABLE IF NOT EXISTS common.corporate_actions_mw (
     corporate_actions_id
