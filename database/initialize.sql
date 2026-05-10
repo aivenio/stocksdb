@@ -15,6 +15,9 @@ Copyright © [2021] Debmalya Pramanik (ZenithClown), AivenIO DBA
 CREATE SCHEMA IF NOT EXISTS
     common AUTHORIZATION postgres;
 
+CREATE SCHEMA IF NOT EXISTS
+    private AUTHORIZATION postgres;
+
 /********************************************************************
 SQL Table Schema Execution Order - STRICT Follow
 ********************************************************************/
