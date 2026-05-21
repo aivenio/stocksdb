@@ -1,0 +1,455 @@
+project stocksdb {
+  database_type: 'postgresql'
+  note: '''
+  # Stock Market Database (stocksdb)
+
+  Operational stock-market data store hosted on **Aiven PostgreSQL v18.1**.
+  Stores master data for securities, exchanges, corporate actions, and
+  OHLC price time-series via the **TimescaleDB** extension.
+
+  ## Schema Layout
+
+  | Schema    | Purpose                                                       |
+  |:----------|:--------------------------------------------------------------|
+  | `public`  | Bootstrap / operational meta-tables (data sources)           |
+  | `common`  | Master and reference data (exchanges, securities, geography) |
+  | `private` | Transactional time-series data (OHLC prices — hypertable)    |
+
+  ## Naming Conventions
+
+  | Suffix | Meaning                              |
+  |:-------|:-------------------------------------|
+  | `*_mw` | Master / world-scope reference table |
+  | `*_tx` | Transactional / fact table           |
+
+  ## Logical Replication (Subscriptions from MacroDB)
+
+  Four `common` schema tables are read-only and populated via PostgreSQL
+  logical replication subscriptions from the **MacroDB** reference database.
+  `INSERT / UPDATE / DELETE` are revoked from `PUBLIC` on all four tables.
+
+  | Subscription                  | Source Publication          | Tables                                                    |
+  |:------------------------------|:----------------------------|:----------------------------------------------------------|
+  | `macrodb_currency_reference`  | `macrodb_currency_table`    | `common.currency_mw`                                      |
+  | `macrodb_geography_reference` | `macrodb_geography_table`   | `common.country_mw`, `common.state_mw`, `common.city_mw`  |
+
+  ## Custom Enum Types (PostgreSQL — Not Representable in DBML Free Tier)
+
+  | Type                            | Values | Used in                                              |
+  |:--------------------------------|:------:|:-----------------------------------------------------|
+  | `common.security_issue_type`    | 22     | `common.securities_mw.security_issuer_type`          |
+  | `common.corporate_actions_type` | 71     | `common.corporate_actions_mw.corporate_actions_type` |
+  | `private.timeframe_value`       | 8      | `private.security_prices_tx.timeframe`               |
+
+  Enum columns are represented as `varchar` in this diagram.
+  '''
+}
+
+// ============================================================================
+// public schema — operational bootstrap
+// ============================================================================
+
+table public.data_source_mw {
+  data_source_id   char(5)      [pk]              // pk_data_source_id
+  data_source_name varchar(64)  [not null, unique] // uq_data_source_name
+  data_source_desc varchar(256) [not null]
+  data_source_uri  varchar(128) [not null, unique] // uq_data_source_uri
+
+  note: '''
+  ## Data Source Master (`_mw`)
+
+  Bootstrap reference table recording every external data source, its URI, and
+  a human-readable description. All master-data and transactional tables carry a
+  `data_source_id` foreign key pointing here for full audit-trail coverage.
+
+  ### Referenced By
+
+  - **`common.stock_exchange_mw`** — `fk_exchange_data_source_id`
+  - **`common.securities_mw`** — `fk_isin_data_source_id`
+  - **`common.securities_exchange_symbol_mw`** — `fk_ses_data_source_id`
+  - **`private.security_prices_tx`** — `fk_ticker_data_source_id`
+
+  ### Seeded Values
+
+  Five records pre-loaded from `database/schema/public/seed/data_source.sql`:
+  `ISIN0` (NSDL ISIN list), `MIC00` (ISO 10383 MIC codes), `NSEMD` (NSE securities),
+  `NSEEQ` (NSE equity segment CSV), `FYERS` (Fyers historical data API).
+  '''
+}
+
+// ============================================================================
+// common schema — macrodb subscription reference tables
+// ============================================================================
+
+table common.currency_mw {
+  currency_code     char(3)     [pk]               // pk_currency_code
+  currency_name     varchar(64) [not null, unique]  // uq_currency_name
+  currency_symbol   varchar(16) [unique]            // uq_currency_symbol
+  currency_type     char(1)     [not null]
+  currency_subtype  char(1)
+  n_decimals        integer     [not null, default: 2]
+  minor_unit_name   varchar(32)
+  minor_unit_symbol varchar(16)
+  minor_unit_factor integer
+
+  note: '''
+  ## Currency Reference (`_mw`) — MacroDB Subscription
+
+  Read-only ISO 4217 currency reference table. Populated via logical replication
+  subscription `macrodb_currency_reference` from publication `macrodb_currency_table`
+  on the MacroDB reference database. `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+
+  Foreign-key constraints to other tables are intentionally omitted to avoid
+  load-order failures during replication apply.
+
+  ### Check Constraints
+
+  - `ck_minor_currency_null` — `minor_unit_name`, `minor_unit_symbol`, and
+    `minor_unit_factor` must all be `NULL` or all be non-`NULL` together
+    (`NUM_NULLS(...) IN (0, 3)`).
+  '''
+}
+
+table common.country_mw {
+  country_code     char(3)      [pk]               // pk_country_code
+  country_name     varchar(64)  [not null, unique]  // uq_country_name
+  continent_code   char(2)      [not null]
+  region_code      char(3)      [not null]
+  subregion_code   char(3)      [not null]
+  iso2_code        char(2)      [not null, unique]  // uq_country_iso2
+  numeric_code     char(3)      [not null, unique]  // uq_country_numeric_code
+  top_level_domain char(3)      [unique]            // uq_country_top_level_domain
+  wikidata_id      varchar(8)   [unique]            // uq_country_wikidata_id
+  geoname_id       varchar(8)   [unique]            // uq_country_geoname_id
+  country_flag_uri varchar(256) [unique]            // uq_country_flag_uri
+
+  note: '''
+  ## Country Reference (`_mw`) — MacroDB Subscription
+
+  Read-only ISO 3166-1 country reference table. Populated via logical replication
+  subscription `macrodb_geography_reference` from publication `macrodb_geography_table`
+  on the MacroDB reference database. `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+
+  Foreign-key constraints to other tables are intentionally omitted to avoid
+  load-order failures during replication apply.
+
+  ### Referenced By
+
+  - **`common.stock_exchange_mw`** — `fk_stock_exchange_country_id`
+  - **`common.state_mw`** — Logical reference (no FK constraint — subscription table)
+  - **`common.city_mw`** — Logical reference (no FK constraint — subscription table)
+  '''
+}
+
+table common.state_mw {
+  state_uuid      char(5)      [pk]       // pk_state_uuid
+  state_code      varchar(5)
+  state_name      varchar(64)  [not null]
+  country_code    char(3)      [not null]  // logical ref → common.country_mw · no FK constraint (subscription table)
+  state_type      char(3)
+  state_latitude  numeric(9,6)
+  state_longitude numeric(9,6)
+  wikidata_id     varchar(8)   [unique]   // uq_state_wikidata_id
+  geoname_id      varchar(8)   [unique]   // uq_state_geoname_id
+
+  indexes {
+    (country_code, state_name) [unique, name: 'uq_state_name'] // composite: state name unique per country
+    (country_code, state_code) [unique, name: 'uq_state_code'] // composite: state code unique per country
+  }
+
+  note: '''
+  ## State / Province Reference (`_mw`) — MacroDB Subscription
+
+  Read-only state and province reference table. Populated via logical replication
+  subscription `macrodb_geography_reference` from publication `macrodb_geography_table`
+  on the MacroDB reference database. `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+
+  `country_code` carries a logical reference to `common.country_mw` but has no
+  explicit FK constraint (omitted on the subscriber side to avoid apply-time errors).
+
+  ### Composite Unique Constraints
+
+  - `uq_state_name`: (`country_code`, `state_name`) — State name unique within a country.
+  - `uq_state_code`: (`country_code`, `state_code`) — State code unique within a country.
+
+  ### Referenced By
+
+  - **`common.city_mw`** — Logical reference (no FK constraint — subscription table)
+  '''
+}
+
+table common.city_mw {
+  city_code      char(5)      [pk]       // pk_city_code
+  city_name      varchar(64)  [not null]
+  country_code   char(3)      [not null]  // logical ref → common.country_mw · no FK constraint (subscription table)
+  state_uuid     char(5)      [not null]  // logical ref → common.state_mw · no FK constraint (subscription table)
+  city_type      varchar(32)
+  city_latitude  numeric(9,6)
+  city_longitude numeric(9,6)
+  wikidata_id    varchar(8)   [unique]   // uq_city_wikidata_id
+  geoname_id     varchar(8)   [unique]   // uq_city_geoname_id
+
+  indexes {
+    (country_code, state_uuid, city_name) [unique, name: 'uq_city_name'] // composite: city name unique per country-state
+  }
+
+  note: '''
+  ## City Reference (`_mw`) — MacroDB Subscription
+
+  Read-only city reference table. Populated via logical replication subscription
+  `macrodb_geography_reference` from publication `macrodb_geography_table` on the
+  MacroDB reference database. `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+
+  `country_code` and `state_uuid` carry logical references to `common.country_mw`
+  and `common.state_mw` respectively, but have no explicit FK constraints (omitted
+  on the subscriber side to avoid apply-time errors).
+
+  ### Composite Unique Constraints
+
+  - `uq_city_name`: (`country_code`, `state_uuid`, `city_name`) — City name unique
+    within a country-state combination.
+
+  ### Referenced By
+
+  - **`common.stock_exchange_mw`** — `fk_stock_exchange_registered_city_code`
+  '''
+}
+
+// ============================================================================
+// common schema — stock exchange master data
+// ============================================================================
+
+table common.stock_exchange_mw {
+  market_identifier_code    char(4)     [pk]                                                         // pk_market_identifier_code
+  operating_mic_code        char(4)     [not null]
+  legal_exchange_name       varchar(64) [not null]
+  scock_exchange_acronym    varchar(16)
+  stock_exchange_country_id char(3)     [not null, ref: > common.country_mw.country_code]            // fk_stock_exchange_country_id · on update cascade · on delete restrict
+  registered_city_code      char(5)     [ref: > common.city_mw.city_code]                           // fk_stock_exchange_registered_city_code · on update cascade · on delete restrict
+  operational_from          date        [not null]
+  operational_to            date
+  data_source_id            char(5)     [not null, ref: > public.data_source_mw.data_source_id]      // fk_exchange_data_source_id · on update cascade · on delete restrict
+
+  indexes {
+    (stock_exchange_country_id, legal_exchange_name) [unique, name: 'uq_stock_exchange_name'] // composite: exchange name unique per country
+  }
+
+  note: '''
+  ## Stock Exchange Master (`_mw`)
+
+  ISO 10383 MIC-coded master table of all tracked stock exchanges globally.
+  `operating_mic_code` identifies the operating entity (may differ from the MIC
+  for segment-level MICs). `operational_to` is `NULL` for currently active exchanges.
+
+  > **Note:** The column `scock_exchange_acronym` is a known typo in the DDL
+  > (intended: `stock_exchange_acronym`). Retained here to match the live schema.
+
+  ### Parents
+
+  - **`common.country_mw`** — `fk_stock_exchange_country_id`
+  - **`common.city_mw`** — `fk_stock_exchange_registered_city_code` (nullable)
+  - **`public.data_source_mw`** — `fk_exchange_data_source_id`
+
+  ### Composite Unique Constraints
+
+  - `uq_stock_exchange_name`: (`stock_exchange_country_id`, `legal_exchange_name`) —
+    Exchange legal name unique per country.
+
+  ### Referenced By
+
+  - **`common.securities_exchange_symbol_mw`** — `fk_ses_market_identifier_code`
+
+  ### Seeded Values
+
+  Four Indian exchanges pre-loaded from `database/schema/common/seed/exchanges.sql`:
+  `XBOM` (BSE Limited), `XIMC` (MCX), `XNSE` (NSE Limited), `XCAL` (Calcutta Stock Exchange).
+  '''
+}
+
+// ============================================================================
+// common schema — securities master data
+// ============================================================================
+
+table common.securities_mw {
+  security_isin_code    char(12)     [pk]                                                            // pk_security_isin_code
+  security_description  varchar(255) [not null]
+  security_issuer_name  varchar(255)
+  security_issuer_type  varchar(64)                                                                   // enum: common.security_issue_type (22 values: equity, bond, G-sec, MF, REIT, warrant, etc.)
+  isin_data_source_id   char(5)      [not null, ref: > public.data_source_mw.data_source_id]         // fk_isin_data_source_id · on update cascade · on delete restrict
+
+  indexes {
+    security_issuer_type [name: 'ix_securities_mw_security_issuer_type']
+  }
+
+  note: '''
+  ## Securities Master (`_mw`)
+
+  Global master list of securities identified by 12-character ISIN. Kept intentionally
+  minimal to support easy publication and public-domain distribution. Exchange-specific
+  symbol mappings live in `common.securities_exchange_symbol_mw`.
+
+  `security_issuer_type` stores values from the PostgreSQL enum
+  `common.security_issue_type` (22 values covering equities, bonds, G-secs, mutual
+  funds, REITs, warrants, and more). Represented here as `varchar(64)`.
+
+  ### Parents
+
+  - **`public.data_source_mw`** — `fk_isin_data_source_id`
+
+  ### Referenced By
+
+  - **`common.securities_exchange_symbol_mw`** — `fk_security_isin_code_symbol`
+  - **`common.corporate_actions_mw`** — `fk_security_isin_code_corp_action`
+  '''
+}
+
+table common.securities_exchange_symbol_mw {
+  ses_primary_id         integer      [pk, increment]                                                         // pk_securities_exchange_symbol_id · generated always as identity
+  security_isin_code     char(12)     [not null, ref: > common.securities_mw.security_isin_code]              // fk_security_isin_code_symbol · on update cascade · on delete restrict
+  market_identifier_code char(4)      [not null, ref: > common.stock_exchange_mw.market_identifier_code]      // fk_ses_market_identifier_code · on update cascade · on delete restrict
+  exchange_symbol        varchar(32)  [not null]
+  exchange_symbol_name   varchar(255) [not null]
+  symbol_series_code     varchar(16)
+  ses_data_source_id     char(5)      [not null, ref: > public.data_source_mw.data_source_id]                 // fk_ses_data_source_id · on update cascade · on delete restrict
+  created_on             timestamptz  [not null, default: `now()`]
+
+  indexes {
+    market_identifier_code [name: 'ix_securities_exchange_symbol_mw_market_identifier_code']
+    symbol_series_code      [name: 'ix_securities_exchange_symbol_mw_symbol_series_code']
+    exchange_symbol         [name: 'ix_securities_exchange_symbol_mw_exchange_symbol']
+    (security_isin_code, market_identifier_code, exchange_symbol, exchange_symbol_name) [unique, name: 'uq_exchange_symbol'] // composite: symbol unique per isin-exchange-name
+  }
+
+  note: '''
+  ## Securities Exchange Symbol Mapping (`_mw`)
+
+  Bridge table mapping each ISIN to one or more trading symbols across different
+  exchanges. A single security (ISIN) can trade under different symbols on NSE,
+  BSE, MCX, etc. `symbol_series_code` holds the exchange series code (e.g. `EQ`,
+  `BE`, `N1`).
+
+  ### Parents
+
+  - **`common.securities_mw`** — `fk_security_isin_code_symbol`
+  - **`common.stock_exchange_mw`** — `fk_ses_market_identifier_code`
+  - **`public.data_source_mw`** — `fk_ses_data_source_id`
+
+  ### Composite Unique Constraints
+
+  - `uq_exchange_symbol`: (`security_isin_code`, `market_identifier_code`,
+    `exchange_symbol`, `exchange_symbol_name`) — Prevents duplicate symbol
+    registrations for the same ISIN on the same exchange.
+
+  ### Referenced By
+
+  - **`private.security_prices_tx`** — `fk_security_isin_code_symbol`
+  '''
+}
+
+table common.corporate_actions_mw {
+  corporate_actions_id          integer      [pk, increment]                                                   // pk_corporate_actions_id · generated always as identity
+  security_isin_code            char(12)     [not null, ref: > common.securities_mw.security_isin_code]        // fk_security_isin_code_corp_action · on update cascade · on delete restrict
+  corporate_actions_type        varchar(64)  [not null]                                                        // enum: common.corporate_actions_type (71 values: IPO, splits, dividends, mergers, etc.)
+  corporate_actions_date        date         [not null]
+  corporate_actions_description varchar(255)
+  actions_data_source           varchar(255) [not null]
+  created_on                    timestamptz  [not null, default: `now()`]
+
+  indexes {
+    (security_isin_code, corporate_actions_type, corporate_actions_date) [unique, name: 'uq_corporate_actions'] // composite: one action type per security per date
+  }
+
+  note: '''
+  ## Corporate Actions (`_mw`)
+
+  Chronological log of material corporate events affecting securities. Covers 71
+  action types from the PostgreSQL enum `common.corporate_actions_type`, including
+  listing events (IPO, delisting), share capital actions (splits, buybacks, rights
+  issues), dividends, financial results, governance changes, and regulatory actions.
+  Represented here as `varchar(64)`.
+
+  ### Parents
+
+  - **`common.securities_mw`** — `fk_security_isin_code_corp_action`
+
+  ### Composite Unique Constraints
+
+  - `uq_corporate_actions`: (`security_isin_code`, `corporate_actions_type`,
+    `corporate_actions_date`) — One action type per security per calendar date.
+  '''
+}
+
+// ============================================================================
+// private schema — time-series transactional data (timescaledb hypertable)
+// ============================================================================
+
+table private.security_prices_tx {
+  effective_time        timestamptz   [not null]                                                              // timescaledb time dimension · chunk_time_interval: 30 days
+  exchange_symbol_ext   varchar(72)   [not null]                                                              // format: <exchange>:<symbol>-<series>  e.g. NSE:RELIANCE-EQ
+  timeframe             varchar(4)    [not null]                                                              // enum: private.timeframe_value (1m, 3m, 5m, 15m, 1h, 1D, 1M, 1Y)
+  ses_primary_id        integer       [ref: > common.securities_exchange_symbol_mw.ses_primary_id]           // fk_security_isin_code_symbol · on update no action · on delete no action
+  open_price            numeric(21,5) [not null]
+  high_price            numeric(21,5) [not null]
+  low_price             numeric(21,5) [not null]
+  close_price           numeric(21,5) [not null]
+  volume                bigint
+  ticker_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]                // fk_ticker_data_source_id · on update cascade · on delete restrict
+
+  indexes {
+    exchange_symbol_ext [name: 'ix_security_prices_tx_exchange_symbol_ext']
+    timeframe           [name: 'ix_security_prices_tx_timeframe']
+  }
+
+  note: '''
+  ## Security Prices Time-Series (`_tx`) — TimescaleDB Hypertable
+
+  OHLC (open / high / low / close) and volume records for exchange-listed securities
+  across multiple timeframes. Managed by TimescaleDB as a hypertable partitioned on
+  `effective_time` with 30-day chunks for efficient range queries.
+
+  **No explicit primary key is defined.** TimescaleDB hypertables do not require a PK;
+  uniqueness is enforced at the application layer using the combination of
+  `effective_time` + `exchange_symbol_ext` + `timeframe`.
+
+  `exchange_symbol_ext` uses the Fyers API format `<exchange>:<symbol>-<series>`
+  (e.g. `NSE:RELIANCE-EQ`). It deliberately denormalises the symbol for read
+  performance and to survive renames without cascading FK updates.
+
+  `timeframe` stores values from the PostgreSQL enum `private.timeframe_value`
+  (`1m`, `3m`, `5m`, `15m`, `1h`, `1D`, `1M`, `1Y`). Represented here as `varchar(4)`.
+
+  ### Parents
+
+  - **`common.securities_exchange_symbol_mw`** — `fk_security_isin_code_symbol` (nullable)
+  - **`public.data_source_mw`** — `fk_ticker_data_source_id`
+  '''
+}
+
+// ============================================================================
+// table groups — layout clusters for dbdiagram.io
+// ============================================================================
+
+tablegroup data_sources {
+  public.data_source_mw
+}
+
+tablegroup subscribed_reference {
+  common.currency_mw
+  common.country_mw
+  common.state_mw
+  common.city_mw
+}
+
+tablegroup master_exchange {
+  common.stock_exchange_mw
+}
+
+tablegroup master_securities {
+  common.securities_mw
+  common.securities_exchange_symbol_mw
+  common.corporate_actions_mw
+}
+
+tablegroup transactional {
+  private.security_prices_tx
+}
