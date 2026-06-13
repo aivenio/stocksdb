@@ -323,7 +323,7 @@ risk. Scope is the entire `database/` tree, not only the MVP v1 diff.
 | :---: | :---: | --- | :---: |
 | SA-1 | High | Replication credentials live in `CREATE SUBSCRIPTION` conninfo | Open (policy) |
 | SA-2 | Medium | No committed role / privilege model; inconsistent `REVOKE` coverage | Deferred |
-| SA-3 | Medium | `AUTHORIZATION postgres` may not exist on the target (Aiven) | Open |
+| SA-3 | Info | `AUTHORIZATION postgres` hardcodes the schema owner (portability) | Accepted |
 | SA-4 | Low | `data_source_uri` may carry secrets and is broadly readable | Mitigated (policy) |
 | SA-5 | Low | Schema-level `PUBLIC` grant posture is implicit | Info |
 
@@ -357,16 +357,20 @@ explicitly, but the `common` master tables (`securities_mw`, `stock_exchange_mw`
     (and `common`) so the posture is self-enforcing for future tables. Deferred
     from v1 because roles are deployment-specific.
 
-### SA-3 - `AUTHORIZATION postgres` assumption (Medium)
+### SA-3 - `AUTHORIZATION postgres` hardcodes the schema owner (Info)
 
 `database/initialize.sql` creates the `common` and `private` schemas
-`AUTHORIZATION postgres`. On Aiven the superuser is typically `avnadmin`, not
-`postgres`, so the statement may fail or assign ownership to an unintended role;
-the subscription statements likewise assume superuser / replication rights.
+`AUTHORIZATION postgres`. This is correct for the AivenIO-managed instance, where
+`postgres` is the superuser. (**AivenIO** is the operating organisation / DBA - it
+is unrelated to the Aiven cloud provider, so no `avnadmin`-style managed role is
+implied.) The only residual consideration is portability: the literal `postgres`
+owner would need changing if the schema were ever deployed to infrastructure whose
+admin role differs.
 
-  * **Remediation:** parameterize the owner to the target platform's admin role,
-    or omit `AUTHORIZATION` and let the connecting admin own the schema. Confirm
-    replication privileges for the role running the build.
+  * **Remediation:** none required for the current deployment. If portability is
+    later needed, parameterize the owner or omit `AUTHORIZATION` so the connecting
+    admin owns the schema. Confirm the build role holds replication privileges for
+    the subscription statements.
 
 ### SA-4 - `data_source_uri` secret exposure (Low)
 
