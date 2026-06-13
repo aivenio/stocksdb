@@ -1,5 +1,13 @@
 /********************************************************************
 Table(s) to Track the List of Stock Exchanges for Securities
+
+Each exchange is a trading venue that operates within a single country
+and settles trades in a single home (trading) currency. The country is
+referenced through the country master and the trading currency through
+the currency master, so that every price and contract recorded against
+the venue inherits both its geography and its denomination.
+
+-- ..versionadded:: 2026-06-13 trading_currency_code currency reference
 ********************************************************************/
 
 CREATE TABLE IF NOT EXISTS common.stock_exchange_mw (
@@ -27,6 +35,13 @@ CREATE TABLE IF NOT EXISTS common.stock_exchange_mw (
         CHAR(5)
         CONSTRAINT fk_stock_exchange_registered_city_code
             REFERENCES common.city_mw(city_code)
+            ON UPDATE CASCADE
+            ON DELETE RESTRICT,
+
+    trading_currency_code
+        CHAR(3) NOT NULL
+        CONSTRAINT fk_stock_exchange_currency
+            REFERENCES common.currency_mw(currency_code)
             ON UPDATE CASCADE
             ON DELETE RESTRICT,
 
