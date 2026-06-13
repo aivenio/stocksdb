@@ -4,16 +4,23 @@ project stocksdb {
   # Stock Market Database (stocksdb)
 
   Operational stock-market data store hosted on **Aiven PostgreSQL v18.1**.
-  Stores master data for securities, exchanges, corporate actions, and
-  OHLC price time-series via the **TimescaleDB** extension.
+  A global, multi-country, multi-currency store of master data for securities,
+  indices, exchanges, corporate actions, and derivative contracts, plus
+  one-minute-granularity time-series facts: equity & index OHLC prices,
+  derivative (option / future) candles, and the full option chain.
+
+  Time-series facts are plain heap tables in this revision - native range
+  partitioning and an eventual **TimescaleDB** migration are deferred to a
+  later phase. **Commodities and currencies (as tradable assets) are strictly
+  out of scope.**
 
   ## Schema Layout
 
   | Schema    | Purpose                                                       |
   |:----------|:--------------------------------------------------------------|
   | `public`  | Bootstrap / operational meta-tables (data sources)           |
-  | `common`  | Master and reference data (exchanges, securities, geography) |
-  | `private` | Transactional time-series data (OHLC prices — hypertable)    |
+  | `common`  | Master and reference data (exchanges, securities, indices, contracts, geography) |
+  | `private` | Time-series facts - plain heap tables (prices, derivative candles, option chain) |
 
   ## Naming Conventions
 
@@ -33,20 +40,23 @@ project stocksdb {
   | `macrodb_currency_reference`  | `macrodb_currency_table`    | `common.currency_mw`                                      |
   | `macrodb_geography_reference` | `macrodb_geography_table`   | `common.country_mw`, `common.state_mw`, `common.city_mw`  |
 
-  ## Custom Enum Types (PostgreSQL — Not Representable in DBML Free Tier)
+  ## Custom Enum Types (PostgreSQL - Not Representable in DBML Free Tier)
 
-  | Type                            | Values | Used in                                              |
-  |:--------------------------------|:------:|:-----------------------------------------------------|
-  | `common.security_issue_type`    | 22     | `common.securities_mw.security_issuer_type`          |
-  | `common.corporate_actions_type` | 71     | `common.corporate_actions_mw.corporate_actions_type` |
-  | `private.timeframe_value`       | 8      | `private.security_prices_tx.timeframe`               |
+  | Type                                | Values | Used in                                              |
+  |:------------------------------------|:------:|:-----------------------------------------------------|
+  | `common.security_issue_type`        | 22     | `common.securities_mw.security_issuer_type`          |
+  | `common.corporate_actions_type`     | 71     | `common.corporate_actions_mw.corporate_actions_type` |
+  | `common.underlying_type`            | 2      | `common.derivative_contract_mw.underlying_type`      |
+  | `common.option_type`                | 2      | `common.derivative_contract_mw.option_type`          |
+  | `common.derivative_instrument_type` | 4      | `common.derivative_contract_mw.instrument_type`      |
+  | `private.timeframe_value`           | 8      | `private.security_prices_tx.timeframe` (+ index / derivative facts) |
 
   Enum columns are represented as `varchar` in this diagram.
   '''
 }
 
 // ============================================================================
-// public schema — operational bootstrap
+// public schema - operational bootstrap
 // ============================================================================
 
 table public.data_source_mw {
@@ -62,12 +72,20 @@ table public.data_source_mw {
   a human-readable description. All master-data and transactional tables carry a
   `data_source_id` foreign key pointing here for full audit-trail coverage.
 
+  > **Note:** `data_source_uri` must store a bare base URL only - never a query
+  > string or an embedded credential / token.
+
   ### Referenced By
 
-  - **`common.stock_exchange_mw`** — `fk_exchange_data_source_id`
-  - **`common.securities_mw`** — `fk_isin_data_source_id`
-  - **`common.securities_exchange_symbol_mw`** — `fk_ses_data_source_id`
-  - **`private.security_prices_tx`** — `fk_ticker_data_source_id`
+  - **`common.stock_exchange_mw`** - `fk_exchange_data_source_id`
+  - **`common.securities_mw`** - `fk_isin_data_source_id`
+  - **`common.securities_exchange_symbol_mw`** - `fk_ses_data_source_id`
+  - **`common.market_index_mw`** - `fk_market_index_data_source`
+  - **`common.derivative_contract_mw`** - `fk_dc_data_source`
+  - **`private.security_prices_tx`** - `fk_sp_data_source`
+  - **`private.index_prices_tx`** - `fk_ip_data_source`
+  - **`private.derivative_prices_tx`** - `fk_dp_data_source`
+  - **`private.option_chain_tx`** - `fk_oc_data_source`
 
   ### Seeded Values
 
@@ -78,7 +96,7 @@ table public.data_source_mw {
 }
 
 // ============================================================================
-// common schema — macrodb subscription reference tables
+// common schema - macrodb subscription reference tables
 // ============================================================================
 
 table common.currency_mw {
@@ -93,7 +111,7 @@ table common.currency_mw {
   minor_unit_factor integer
 
   note: '''
-  ## Currency Reference (`_mw`) — MacroDB Subscription
+  ## Currency Reference (`_mw`) - MacroDB Subscription
 
   Read-only ISO 4217 currency reference table. Populated via logical replication
   subscription `macrodb_currency_reference` from publication `macrodb_currency_table`
@@ -104,9 +122,13 @@ table common.currency_mw {
 
   ### Check Constraints
 
-  - `ck_minor_currency_null` — `minor_unit_name`, `minor_unit_symbol`, and
+  - `ck_minor_currency_null` - `minor_unit_name`, `minor_unit_symbol`, and
     `minor_unit_factor` must all be `NULL` or all be non-`NULL` together
     (`NUM_NULLS(...) IN (0, 3)`).
+
+  ### Referenced By
+
+  - **`common.stock_exchange_mw`** - `fk_stock_exchange_currency` (trading currency)
   '''
 }
 
@@ -124,7 +146,7 @@ table common.country_mw {
   country_flag_uri varchar(256) [unique]            // uq_country_flag_uri
 
   note: '''
-  ## Country Reference (`_mw`) — MacroDB Subscription
+  ## Country Reference (`_mw`) - MacroDB Subscription
 
   Read-only ISO 3166-1 country reference table. Populated via logical replication
   subscription `macrodb_geography_reference` from publication `macrodb_geography_table`
@@ -135,9 +157,9 @@ table common.country_mw {
 
   ### Referenced By
 
-  - **`common.stock_exchange_mw`** — `fk_stock_exchange_country_id`
-  - **`common.state_mw`** — Logical reference (no FK constraint — subscription table)
-  - **`common.city_mw`** — Logical reference (no FK constraint — subscription table)
+  - **`common.stock_exchange_mw`** - `fk_stock_exchange_country_id`
+  - **`common.state_mw`** - Logical reference (no FK constraint - subscription table)
+  - **`common.city_mw`** - Logical reference (no FK constraint - subscription table)
   '''
 }
 
@@ -158,7 +180,7 @@ table common.state_mw {
   }
 
   note: '''
-  ## State / Province Reference (`_mw`) — MacroDB Subscription
+  ## State / Province Reference (`_mw`) - MacroDB Subscription
 
   Read-only state and province reference table. Populated via logical replication
   subscription `macrodb_geography_reference` from publication `macrodb_geography_table`
@@ -169,12 +191,12 @@ table common.state_mw {
 
   ### Composite Unique Constraints
 
-  - `uq_state_name`: (`country_code`, `state_name`) — State name unique within a country.
-  - `uq_state_code`: (`country_code`, `state_code`) — State code unique within a country.
+  - `uq_state_name`: (`country_code`, `state_name`) - State name unique within a country.
+  - `uq_state_code`: (`country_code`, `state_code`) - State code unique within a country.
 
   ### Referenced By
 
-  - **`common.city_mw`** — Logical reference (no FK constraint — subscription table)
+  - **`common.city_mw`** - Logical reference (no FK constraint - subscription table)
   '''
 }
 
@@ -194,7 +216,7 @@ table common.city_mw {
   }
 
   note: '''
-  ## City Reference (`_mw`) — MacroDB Subscription
+  ## City Reference (`_mw`) - MacroDB Subscription
 
   Read-only city reference table. Populated via logical replication subscription
   `macrodb_geography_reference` from publication `macrodb_geography_table` on the
@@ -206,17 +228,17 @@ table common.city_mw {
 
   ### Composite Unique Constraints
 
-  - `uq_city_name`: (`country_code`, `state_uuid`, `city_name`) — City name unique
+  - `uq_city_name`: (`country_code`, `state_uuid`, `city_name`) - City name unique
     within a country-state combination.
 
   ### Referenced By
 
-  - **`common.stock_exchange_mw`** — `fk_stock_exchange_registered_city_code`
+  - **`common.stock_exchange_mw`** - `fk_stock_exchange_registered_city_code`
   '''
 }
 
 // ============================================================================
-// common schema — stock exchange master data
+// common schema - stock exchange master data
 // ============================================================================
 
 table common.stock_exchange_mw {
@@ -226,6 +248,7 @@ table common.stock_exchange_mw {
   scock_exchange_acronym    varchar(16)
   stock_exchange_country_id char(3)     [not null, ref: > common.country_mw.country_code]            // fk_stock_exchange_country_id · on update cascade · on delete restrict
   registered_city_code      char(5)     [ref: > common.city_mw.city_code]                           // fk_stock_exchange_registered_city_code · on update cascade · on delete restrict
+  trading_currency_code     char(3)     [not null, ref: > common.currency_mw.currency_code]          // fk_stock_exchange_currency · on update cascade · on delete restrict
   operational_from          date        [not null]
   operational_to            date
   data_source_id            char(5)     [not null, ref: > public.data_source_mw.data_source_id]      // fk_exchange_data_source_id · on update cascade · on delete restrict
@@ -241,33 +264,40 @@ table common.stock_exchange_mw {
   `operating_mic_code` identifies the operating entity (may differ from the MIC
   for segment-level MICs). `operational_to` is `NULL` for currently active exchanges.
 
+  Each venue is tied to a country and to a single home `trading_currency_code`,
+  so prices and contracts on the exchange inherit both geography and denomination.
+
   > **Note:** The column `scock_exchange_acronym` is a known typo in the DDL
   > (intended: `stock_exchange_acronym`). Retained here to match the live schema.
 
   ### Parents
 
-  - **`common.country_mw`** — `fk_stock_exchange_country_id`
-  - **`common.city_mw`** — `fk_stock_exchange_registered_city_code` (nullable)
-  - **`public.data_source_mw`** — `fk_exchange_data_source_id`
+  - **`common.country_mw`** - `fk_stock_exchange_country_id`
+  - **`common.city_mw`** - `fk_stock_exchange_registered_city_code` (nullable)
+  - **`common.currency_mw`** - `fk_stock_exchange_currency` (trading currency)
+  - **`public.data_source_mw`** - `fk_exchange_data_source_id`
 
   ### Composite Unique Constraints
 
-  - `uq_stock_exchange_name`: (`stock_exchange_country_id`, `legal_exchange_name`) —
+  - `uq_stock_exchange_name`: (`stock_exchange_country_id`, `legal_exchange_name`) -
     Exchange legal name unique per country.
 
   ### Referenced By
 
-  - **`common.securities_exchange_symbol_mw`** — `fk_ses_market_identifier_code`
+  - **`common.securities_exchange_symbol_mw`** - `fk_ses_market_identifier_code`
+  - **`common.market_index_mw`** - `fk_market_index_exchange`
+  - **`common.derivative_contract_mw`** - `fk_dc_exchange`
 
   ### Seeded Values
 
-  Four Indian exchanges pre-loaded from `database/schema/common/seed/exchanges.sql`:
+  Four Indian exchanges pre-loaded from `database/schema/common/seed/exchanges.sql`
+  (all denominated in `INR`):
   `XBOM` (BSE Limited), `XIMC` (MCX), `XNSE` (NSE Limited), `XCAL` (Calcutta Stock Exchange).
   '''
 }
 
 // ============================================================================
-// common schema — securities master data
+// common schema - securities master data
 // ============================================================================
 
 table common.securities_mw {
@@ -294,12 +324,13 @@ table common.securities_mw {
 
   ### Parents
 
-  - **`public.data_source_mw`** — `fk_isin_data_source_id`
+  - **`public.data_source_mw`** - `fk_isin_data_source_id`
 
   ### Referenced By
 
-  - **`common.securities_exchange_symbol_mw`** — `fk_security_isin_code_symbol`
-  - **`common.corporate_actions_mw`** — `fk_security_isin_code_corp_action`
+  - **`common.securities_exchange_symbol_mw`** - `fk_security_isin_code_symbol`
+  - **`common.corporate_actions_mw`** - `fk_security_isin_code_corp_action`
+  - **`common.derivative_contract_mw`** - `fk_dc_underlying_isin` (equity underlying)
   '''
 }
 
@@ -330,19 +361,19 @@ table common.securities_exchange_symbol_mw {
 
   ### Parents
 
-  - **`common.securities_mw`** — `fk_security_isin_code_symbol`
-  - **`common.stock_exchange_mw`** — `fk_ses_market_identifier_code`
-  - **`public.data_source_mw`** — `fk_ses_data_source_id`
+  - **`common.securities_mw`** - `fk_security_isin_code_symbol`
+  - **`common.stock_exchange_mw`** - `fk_ses_market_identifier_code`
+  - **`public.data_source_mw`** - `fk_ses_data_source_id`
 
   ### Composite Unique Constraints
 
   - `uq_exchange_symbol`: (`security_isin_code`, `market_identifier_code`,
-    `exchange_symbol`, `exchange_symbol_name`) — Prevents duplicate symbol
+    `exchange_symbol`, `exchange_symbol_name`) - Prevents duplicate symbol
     registrations for the same ISIN on the same exchange.
 
   ### Referenced By
 
-  - **`private.security_prices_tx`** — `fk_security_isin_code_symbol`
+  - **`private.security_prices_tx`** - `fk_sp_exchange_symbol`
   '''
 }
 
@@ -370,63 +401,296 @@ table common.corporate_actions_mw {
 
   ### Parents
 
-  - **`common.securities_mw`** — `fk_security_isin_code_corp_action`
+  - **`common.securities_mw`** - `fk_security_isin_code_corp_action`
 
   ### Composite Unique Constraints
 
   - `uq_corporate_actions`: (`security_isin_code`, `corporate_actions_type`,
-    `corporate_actions_date`) — One action type per security per calendar date.
+    `corporate_actions_date`) - One action type per security per calendar date.
   '''
 }
 
 // ============================================================================
-// private schema — time-series transactional data (timescaledb hypertable)
+// common schema - market index & derivative contract masters
+// ============================================================================
+
+table common.market_index_mw {
+  market_index_id        integer      [pk, increment]                                                  // pk_market_index_id · generated always as identity
+  index_symbol           varchar(32)  [not null]
+  index_name             varchar(128) [not null]
+  market_identifier_code char(4)      [not null, ref: > common.stock_exchange_mw.market_identifier_code] // fk_market_index_exchange · on update cascade · on delete restrict
+  index_provider         varchar(64)
+  base_date              date
+  base_value             numeric(21,5)
+  index_data_source_id   char(5)      [not null, ref: > public.data_source_mw.data_source_id]           // fk_market_index_data_source · on update cascade · on delete restrict
+  created_on             timestamptz  [not null, default: `now()`]
+
+  indexes {
+    (market_identifier_code, index_symbol) [unique, name: 'uq_market_index_symbol'] // composite: index symbol unique per exchange
+  }
+
+  note: '''
+  ## Market Index Master (`_mw`)
+
+  Master of market indices (e.g. `NIFTY 50`, `NASDAQ Composite`) that act as
+  derivative underlyings. Indices have no ISIN, so they are tracked here rather
+  than in `common.securities_mw`. Country and trading currency are derived
+  through the listing exchange.
+
+  ### Parents
+
+  - **`common.stock_exchange_mw`** - `fk_market_index_exchange`
+  - **`public.data_source_mw`** - `fk_market_index_data_source`
+
+  ### Composite Unique Constraints
+
+  - `uq_market_index_symbol`: (`market_identifier_code`, `index_symbol`) -
+    Index symbol unique per exchange.
+
+  ### Referenced By
+
+  - **`common.derivative_contract_mw`** - `fk_dc_underlying_index`
+  - **`private.index_prices_tx`** - `fk_ip_market_index`
+  '''
+}
+
+table common.derivative_contract_mw {
+  derivative_contract_id  bigint        [pk, increment]                                                  // pk_derivative_contract_id · generated always as identity
+  underlying_type         varchar       [not null]                                                       // enum: common.underlying_type (INDEX, EQUITY)
+  underlying_isin         char(12)      [ref: > common.securities_mw.security_isin_code]                 // fk_dc_underlying_isin · nullable · on update cascade · on delete restrict
+  underlying_index_id     integer       [ref: > common.market_index_mw.market_index_id]                  // fk_dc_underlying_index · nullable · on update cascade · on delete restrict
+  instrument_type         varchar       [not null]                                                       // enum: common.derivative_instrument_type (INDEX/STOCK OPTION/FUTURE)
+  option_type             varchar                                                                        // enum: common.option_type (CALL, PUT) · NULL for futures
+  strike_price            numeric(21,5)                                                                  // NULL for futures
+  expiry_date             date          [not null]
+  market_identifier_code  char(4)       [not null, ref: > common.stock_exchange_mw.market_identifier_code] // fk_dc_exchange · on update cascade · on delete restrict
+  tradable_symbol         varchar(64)   [not null]
+  lot_size                integer
+  tick_size               numeric(21,5)
+  contract_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]          // fk_dc_data_source · on update cascade · on delete restrict
+  created_on              timestamptz   [not null, default: `now()`]
+
+  indexes {
+    (market_identifier_code, instrument_type, underlying_type, underlying_isin, underlying_index_id, expiry_date, option_type, strike_price) [unique, name: 'uq_derivative_contract'] // composite (NULLS NOT DISTINCT): one contract per natural key
+  }
+
+  note: '''
+  ## Derivative Contract Master (`_mw`)
+
+  One row per uniquely tradable option or future contract. Options and futures
+  are folded into a single master; the option-only fields (`option_type`,
+  `strike_price`) are `NULL` for futures and governed by check constraints.
+
+  The underlying is polymorphic - either a market index (`underlying_index_id`)
+  or an equity (`underlying_isin`). Represented here as two nullable refs;
+  exactly one is populated.
+
+  `underlying_type`, `instrument_type`, and `option_type` store PostgreSQL enum
+  values (represented here as `varchar`).
+
+  ### Parents
+
+  - **`common.securities_mw`** - `fk_dc_underlying_isin` (equity underlying, nullable)
+  - **`common.market_index_mw`** - `fk_dc_underlying_index` (index underlying, nullable)
+  - **`common.stock_exchange_mw`** - `fk_dc_exchange`
+  - **`public.data_source_mw`** - `fk_dc_data_source`
+
+  ### Check Constraints
+
+  - `ck_dc_underlying_xor` - exactly one underlying ref set, matching `underlying_type`.
+  - `ck_dc_option_fields` - options require `option_type` + positive `strike_price`;
+    futures require both `NULL`.
+  - `ck_dc_inst_underlying` - index instruments ⇒ INDEX underlying; stock ⇒ EQUITY.
+  - `ck_dc_lot_tick` - `lot_size` / `tick_size` positive when present.
+
+  ### Composite Unique Constraints
+
+  - `uq_derivative_contract` (`UNIQUE NULLS NOT DISTINCT`): (`market_identifier_code`,
+    `instrument_type`, `underlying_type`, `underlying_isin`, `underlying_index_id`,
+    `expiry_date`, `option_type`, `strike_price`).
+
+  ### Referenced By
+
+  - **`private.derivative_prices_tx`** - `fk_dp_contract`
+  - **`private.option_chain_tx`** - `fk_oc_contract`
+  '''
+}
+
+// ============================================================================
+// private schema - one-minute time-series facts (plain heap tables)
 // ============================================================================
 
 table private.security_prices_tx {
-  effective_time        timestamptz   [not null]                                                              // timescaledb time dimension · chunk_time_interval: 30 days
-  exchange_symbol_ext   varchar(72)   [not null]                                                              // format: <exchange>:<symbol>-<series>  e.g. NSE:RELIANCE-EQ
-  timeframe             varchar(4)    [not null]                                                              // enum: private.timeframe_value (1m, 3m, 5m, 15m, 1h, 1D, 1M, 1Y)
-  ses_primary_id        integer       [ref: > common.securities_exchange_symbol_mw.ses_primary_id]           // fk_security_isin_code_symbol · on update no action · on delete no action
+  effective_time        timestamptz   [not null]
+  ses_primary_id        integer       [not null, ref: > common.securities_exchange_symbol_mw.ses_primary_id] // fk_sp_exchange_symbol · on update cascade · on delete restrict
+  timeframe             varchar       [not null]                                                              // enum: private.timeframe_value (1m, 3m, 5m, 15m, 1h, 1D, 1M, 1Y)
   open_price            numeric(21,5) [not null]
   high_price            numeric(21,5) [not null]
   low_price             numeric(21,5) [not null]
   close_price           numeric(21,5) [not null]
   volume                bigint
-  ticker_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]                // fk_ticker_data_source_id · on update cascade · on delete restrict
+  ticker_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]                // fk_sp_data_source · on update cascade · on delete restrict
 
   indexes {
-    exchange_symbol_ext [name: 'ix_security_prices_tx_exchange_symbol_ext']
-    timeframe           [name: 'ix_security_prices_tx_timeframe']
+    (ses_primary_id, timeframe, effective_time) [unique, name: 'uq_security_prices'] // composite: one bar per symbol-timeframe-instant
   }
 
   note: '''
-  ## Security Prices Time-Series (`_tx`) — TimescaleDB Hypertable
+  ## Security (Equity) Price Time-Series (`_tx`)
 
-  OHLC (open / high / low / close) and volume records for exchange-listed securities
-  across multiple timeframes. Managed by TimescaleDB as a hypertable partitioned on
-  `effective_time` with 30-day chunks for efficient range queries.
+  One-minute OHLC + volume bars for exchange-listed equities, one row per
+  security-symbol per timeframe per bar. Refactored off the former TimescaleDB
+  hypertable into a **plain heap table**; native range partitioning is deferred.
 
-  **No explicit primary key is defined.** TimescaleDB hypertables do not require a PK;
-  uniqueness is enforced at the application layer using the combination of
-  `effective_time` + `exchange_symbol_ext` + `timeframe`.
+  The previously denormalised `<exchange>:<symbol>-<series>` string has been
+  removed - the grain is now keyed by the `ses_primary_id` foreign key
+  (`NOT NULL`), completing the normalisation.
 
-  `exchange_symbol_ext` uses the Fyers API format `<exchange>:<symbol>-<series>`
-  (e.g. `NSE:RELIANCE-EQ`). It deliberately denormalises the symbol for read
-  performance and to survive renames without cascading FK updates.
-
-  `timeframe` stores values from the PostgreSQL enum `private.timeframe_value`
-  (`1m`, `3m`, `5m`, `15m`, `1h`, `1D`, `1M`, `1Y`). Represented here as `varchar(4)`.
+  `timeframe` stores values from `private.timeframe_value` (represented here as
+  `varchar`).
 
   ### Parents
 
-  - **`common.securities_exchange_symbol_mw`** — `fk_security_isin_code_symbol` (nullable)
-  - **`public.data_source_mw`** — `fk_ticker_data_source_id`
+  - **`common.securities_exchange_symbol_mw`** - `fk_sp_exchange_symbol`
+  - **`public.data_source_mw`** - `fk_sp_data_source`
+
+  ### Constraints
+
+  - `uq_security_prices`: (`ses_primary_id`, `timeframe`, `effective_time`) -
+    integrity grain (no performance index in this revision).
+  - `ck_security_prices_ohlc` - high is the bar max, low the min, prices ≥ 0.
+  - `ck_security_prices_volume` - `volume` ≥ 0 when present.
+
+  `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+  '''
+}
+
+table private.index_prices_tx {
+  effective_time       timestamptz   [not null]
+  market_index_id      integer       [not null, ref: > common.market_index_mw.market_index_id]          // fk_ip_market_index · on update cascade · on delete restrict
+  timeframe            varchar       [not null]                                                          // enum: private.timeframe_value
+  open_price           numeric(21,5) [not null]
+  high_price           numeric(21,5) [not null]
+  low_price            numeric(21,5) [not null]
+  close_price          numeric(21,5) [not null]
+  volume               bigint
+  index_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_ip_data_source · on update cascade · on delete restrict
+
+  indexes {
+    (market_index_id, timeframe, effective_time) [unique, name: 'uq_index_prices'] // composite: one bar per index-timeframe-instant
+  }
+
+  note: '''
+  ## Market Index Price Time-Series (`_tx`)
+
+  One-minute OHLC index levels, one row per index per timeframe per bar. Volume
+  is nullable (many indices have no native traded volume). Plain heap table.
+
+  ### Parents
+
+  - **`common.market_index_mw`** - `fk_ip_market_index`
+  - **`public.data_source_mw`** - `fk_ip_data_source`
+
+  ### Constraints
+
+  - `uq_index_prices`: (`market_index_id`, `timeframe`, `effective_time`).
+  - `ck_index_prices_ohlc` / `ck_index_prices_volume` - OHLC ordering and
+    non-negativity.
+
+  `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+  '''
+}
+
+table private.derivative_prices_tx {
+  effective_time         timestamptz   [not null]
+  derivative_contract_id bigint        [not null, ref: > common.derivative_contract_mw.derivative_contract_id] // fk_dp_contract · on update cascade · on delete restrict
+  timeframe              varchar       [not null]                                                          // enum: private.timeframe_value
+  open_price             numeric(21,5) [not null]
+  high_price             numeric(21,5) [not null]
+  low_price              numeric(21,5) [not null]
+  close_price            numeric(21,5) [not null]
+  volume                 bigint
+  open_interest          bigint
+  ticker_data_source_id  char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_dp_data_source · on update cascade · on delete restrict
+
+  indexes {
+    (derivative_contract_id, timeframe, effective_time) [unique, name: 'uq_derivative_prices'] // composite: one bar per contract-timeframe-instant
+  }
+
+  note: '''
+  ## Derivative (Option & Future) Price Time-Series (`_tx`)
+
+  One-minute OHLC + volume + open-interest candles for listed option and future
+  contracts, one row per contract per timeframe per bar. Plain heap table.
+
+  ### Parents
+
+  - **`common.derivative_contract_mw`** - `fk_dp_contract`
+  - **`public.data_source_mw`** - `fk_dp_data_source`
+
+  ### Constraints
+
+  - `uq_derivative_prices`: (`derivative_contract_id`, `timeframe`, `effective_time`).
+  - `ck_derivative_prices_ohlc` / `ck_derivative_prices_volume` - OHLC ordering;
+    `volume` and `open_interest` non-negative.
+
+  `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
+  '''
+}
+
+table private.option_chain_tx {
+  snapshot_time           timestamptz   [not null]
+  derivative_contract_id  bigint        [not null, ref: > common.derivative_contract_mw.derivative_contract_id] // fk_oc_contract · on update cascade · on delete restrict
+  last_traded_price       numeric(21,5)
+  bid_price               numeric(21,5)
+  ask_price               numeric(21,5)
+  bid_quantity            bigint
+  ask_quantity            bigint
+  open_interest           bigint
+  change_in_open_interest bigint
+  volume                  bigint
+  implied_volatility      numeric(12,6)
+  delta                   numeric(12,6)
+  gamma                   numeric(12,6)
+  theta                   numeric(12,6)
+  vega                    numeric(12,6)
+  rho                     numeric(12,6)
+  underlying_spot_price   numeric(21,5)
+  chain_data_source_id    char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_oc_data_source · on update cascade · on delete restrict
+
+  indexes {
+    (derivative_contract_id, snapshot_time) [unique, name: 'uq_option_chain'] // composite: one snapshot per contract-instant
+  }
+
+  note: '''
+  ## Full Option Chain Snapshot (`_tx`)
+
+  Point-in-time snapshot of a derivative (primarily option) contract as published
+  in the option chain - one row per contract per fetch. Captures the fetch
+  timestamp, the quote (LTP, bid/ask + sizes), open interest and its change,
+  volume, implied volatility, the greeks, and the underlying spot.
+
+  The strike-by-strike chain for an underlying + expiry at an instant is the set
+  of rows sharing that underlying + expiry (via the contract master) at a given
+  `snapshot_time`. Plain heap table.
+
+  ### Parents
+
+  - **`common.derivative_contract_mw`** - `fk_oc_contract`
+  - **`public.data_source_mw`** - `fk_oc_data_source`
+
+  ### Constraints
+
+  - `uq_option_chain`: (`derivative_contract_id`, `snapshot_time`).
+  - `ck_option_chain_nonneg` - prices, sizes, OI, volume, and spot ≥ 0; greeks and
+    `change_in_open_interest` intentionally unconstrained (legitimately negative).
+
+  `INSERT / UPDATE / DELETE` are revoked from `PUBLIC`.
   '''
 }
 
 // ============================================================================
-// table groups — layout clusters for dbdiagram.io
+// table groups - layout clusters for dbdiagram.io
 // ============================================================================
 
 tablegroup data_sources {
@@ -450,6 +714,14 @@ tablegroup master_securities {
   common.corporate_actions_mw
 }
 
+tablegroup master_derivatives {
+  common.market_index_mw
+  common.derivative_contract_mw
+}
+
 tablegroup transactional {
   private.security_prices_tx
+  private.index_prices_tx
+  private.derivative_prices_tx
+  private.option_chain_tx
 }
