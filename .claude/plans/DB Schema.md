@@ -51,6 +51,8 @@ MVP v1 DDL and documentation are implemented and committed under release
         `corporate_actions_type` include, and the orphaned `private` schema wired in.
   - [x] Review remediation - non-negativity checks and `REVOKE` on the private facts.
   - [x] `schema.dbml` updated to mirror the model; em dashes removed repo-wide.
+  - [x] Security audit (2026-06-14) - findings recorded in the Security Audit
+        section below.
 
 ### Pending
 
@@ -306,6 +308,107 @@ These recommendations are owned by the `db-optimizer` agent.
     (Aiven-managed).
   * `public.data_source_mw.data_source_uri` must store bare base URLs only - never
     a query string or an embedded credential / token.
+
+---
+
+## Security Audit (2026-06-14)
+
+Full-schema review against the `db-security-reviewer` criteria - privilege
+posture, referential safety, secrets, data exposure, and definer / dynamic-SQL
+risk. Scope is the entire `database/` tree, not only the MVP v1 diff.
+
+### Findings Summary
+
+| ID | Severity | Area | Status |
+| :---: | :---: | --- | :---: |
+| SA-1 | High | Replication credentials live in `CREATE SUBSCRIPTION` conninfo | Open (policy) |
+| SA-2 | Medium | No committed role / privilege model; inconsistent `REVOKE` coverage | Deferred |
+| SA-3 | Medium | `AUTHORIZATION postgres` may not exist on the target (Aiven) | Open |
+| SA-4 | Low | `data_source_uri` may carry secrets and is broadly readable | Mitigated (policy) |
+| SA-5 | Low | Schema-level `PUBLIC` grant posture is implicit | Info |
+
+### SA-1 - Replication credentials in subscription conninfo (High)
+
+`common/reference/macrodb_currency.sql` and `macrodb_geography.sql` create
+logical-replication subscriptions whose `CONNECTION` string carries a `password=`
+field. The committed value is redacted (`host=***`, `password=***`), which is
+correct, but two risks remain: a real password substituted at deploy time can be
+accidentally committed, and PostgreSQL stores the full conninfo - including the
+password - in `pg_subscription.subconninfo`, readable by superusers and surfaced
+in some logs.
+
+  * **Remediation:** keep the committed placeholders; inject the real conninfo
+    only at deploy time (secret store / environment / `.pgpass` or a connection
+    service file). Never commit live credentials, and rotate immediately if one
+    is ever pushed. Restrict and audit who can read `pg_subscription`.
+
+### SA-2 - No committed role / privilege model (Medium)
+
+The project defines no `CREATE ROLE`, `GRANT`, or `ALTER DEFAULT PRIVILEGES`.
+Write protection relies on PostgreSQL default-deny (a new table grants no DML to
+`PUBLIC`) plus object ownership. The `REVOKE` posture is also inconsistent: the
+four subscription reference tables and the four `private` fact tables assert it
+explicitly, but the `common` master tables (`securities_mw`, `stock_exchange_mw`,
+`securities_exchange_symbol_mw`, `corporate_actions_mw`, `market_index_mw`,
+`derivative_contract_mw`) do not.
+
+  * **Remediation:** add a roles bootstrap - a read-only consumer role and an
+    ingestion writer role - plus `ALTER DEFAULT PRIVILEGES IN SCHEMA private`
+    (and `common`) so the posture is self-enforcing for future tables. Deferred
+    from v1 because roles are deployment-specific.
+
+### SA-3 - `AUTHORIZATION postgres` assumption (Medium)
+
+`database/initialize.sql` creates the `common` and `private` schemas
+`AUTHORIZATION postgres`. On Aiven the superuser is typically `avnadmin`, not
+`postgres`, so the statement may fail or assign ownership to an unintended role;
+the subscription statements likewise assume superuser / replication rights.
+
+  * **Remediation:** parameterize the owner to the target platform's admin role,
+    or omit `AUTHORIZATION` and let the connecting admin own the schema. Confirm
+    replication privileges for the role running the build.
+
+### SA-4 - `data_source_uri` secret exposure (Low)
+
+`public.data_source_mw.data_source_uri` is `VARCHAR(128)` and is referenced by
+every master and fact table, so it is broadly readable. A future row could embed
+an API key / token in the URI (e.g. `?token=...`), which would then be
+world-readable. Current seed values are clean (public CSV URLs and a bare API
+base URL).
+
+  * **Remediation (policy):** store bare base URLs only - never a query string,
+    userinfo, or token. Optionally add a `CHECK` rejecting `'%@%'` userinfo and
+    obvious `'%token=%'` / `'%apikey=%'` patterns; keep credentials in the data
+    source's own secret store, not the lineage table.
+
+### SA-5 - Schema-level `PUBLIC` grant posture (Low / Info)
+
+Schema-level `GRANT` / `REVOKE` is not declared. On PostgreSQL 15+ (this is v18)
+the `public` schema no longer grants `CREATE` to `PUBLIC` by default, so the
+common pre-15 hardening is already satisfied; `USAGE` and table `SELECT` remain
+broadly available, which matches the design intent that `public` / `common`
+reference data is publishable.
+
+  * **Remediation:** none required on v18 for `CREATE`-on-`public`. When the role
+    model (SA-2) lands, assert `REVOKE ALL ON SCHEMA private FROM PUBLIC` and
+    grant `USAGE` only to the consumer / writer roles.
+
+### Verified Clean
+
+  * **Referential safety** - every foreign key uses `ON UPDATE CASCADE / ON
+    DELETE RESTRICT`; no `ON DELETE CASCADE` exists, so price history, lineage,
+    and master rows cannot be cascade-deleted.
+  * **Restricted-write tables** - the four subscription reference tables and the
+    four `private` fact tables `REVOKE INSERT, UPDATE, DELETE ... FROM PUBLIC`.
+  * **Secrets in this codebase** - no live credentials, tokens, or hostnames; the
+    only conninfo strings are placeholdered (see SA-1).
+  * **Data exposure** - only non-sensitive public market data is stored (OHLC,
+    volume, open interest, IV, greeks, strikes, expiries, symbols, lineage IDs);
+    no PII or account / position data. Consistent with `DISCLAIMER.md`.
+  * **Definer / dynamic SQL** - no functions, triggers, `SECURITY DEFINER`, or
+    dynamic SQL present, and all objects are schema-qualified (limiting
+    `search_path` risk). Re-audit when the Phase II roll-up functions are added
+    (pin an explicit `search_path`).
 
 ---
 
