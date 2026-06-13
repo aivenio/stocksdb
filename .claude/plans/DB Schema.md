@@ -30,6 +30,47 @@ and the full option chain - **without** the TimescaleDB extension for now.
 
 ---
 
+## Implementation Status
+
+MVP v1 DDL and documentation are implemented and committed under release
+`v1.0.0` (currently under development - commits `0f2d22b` through `ab29717`).
+
+### Completed
+
+  - [x] Design-of-record (this document) and four `.claude/agents/` subagents
+        (`db-planner`, `db-optimizer`, `db-code-reviewer`, `db-security-reviewer`).
+  - [x] Derivative-domain ENUMs - `option_type`, `derivative_instrument_type`,
+        `underlying_type`.
+  - [x] `trading_currency_code` added to `stock_exchange_mw` and its seed.
+  - [x] Masters - `market_index_mw` and `derivative_contract_mw` with all check
+        and natural-key constraints.
+  - [x] Facts - refactored `security_prices_tx` off TimescaleDB, plus
+        `index_prices_tx`, `derivative_prices_tx`, `option_chain_tx`, and the new
+        `private/initialize.sql`.
+  - [x] Build-order fix (`public` -> `common` -> `private`), the missing
+        `corporate_actions_type` include, and the orphaned `private` schema wired in.
+  - [x] Review remediation - non-negativity checks and `REVOKE` on the private facts.
+  - [x] `schema.dbml` updated to mirror the model; em dashes removed repo-wide.
+
+### Pending
+
+  - [ ] Run the end-to-end DDL verification on a scratch PostgreSQL 18 (see the
+        Verification section) - not yet executed, as no local PostgreSQL is
+        available in the build environment.
+  - [ ] Phase II - native range partitioning, performance indexation, and the
+        optional TimescaleDB migration.
+  - [ ] Deferred hardening - a committed role model with
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA private`.
+  - [ ] Future scope - on-the-fly higher-timeframe roll-up functions and a
+        `common.derivative_underlying_vw` helper view.
+
+### Confirmed Design Decisions
+
+  * `derivative_contract_mw.lot_size` and `tick_size` remain **nullable**
+    (positive-when-present) for flexible, ingestion-friendly loading.
+
+---
+
 ## Scope
 
 ### In Scope (MVP v1)
