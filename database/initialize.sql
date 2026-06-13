@@ -20,7 +20,13 @@ CREATE SCHEMA IF NOT EXISTS
 
 /********************************************************************
 SQL Table Schema Execution Order - STRICT Follow
+
+The public schema is bootstrapped first because every common master and
+private fact table carries a foreign key to public.data_source_mw for
+data lineage. The common reference and master data follows, and the
+private time-series facts (which reference the common masters) load last.
 ********************************************************************/
 
-\i database/schema/common/initialize.sql
 \i database/schema/public/initialize.sql
+\i database/schema/common/initialize.sql
+\i database/schema/private/initialize.sql
