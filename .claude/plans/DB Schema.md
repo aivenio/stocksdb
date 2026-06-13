@@ -253,6 +253,21 @@ These recommendations are owned by the `db-optimizer` agent.
 
 ---
 
+## Security Posture
+
+  * The four `private` fact tables `REVOKE INSERT, UPDATE, DELETE ... FROM PUBLIC`,
+    mirroring the hardening already applied to the subscription reference tables,
+    so the restricted intent of the `private` schema is explicit in the DDL.
+  * **Deferred (hardening):** a committed role model - a read-only consumer role
+    and an ingestion writer role - with `ALTER DEFAULT PRIVILEGES IN SCHEMA private`
+    so the write restriction is self-enforcing for future tables rather than
+    re-declared per table. Left out of v1 because roles are deployment-specific
+    (Aiven-managed).
+  * `public.data_source_mw.data_source_uri` must store bare base URLs only - never
+    a query string or an embedded credential / token.
+
+---
+
 ## Verification
 
   - [ ] Load the new DDL into a scratch PostgreSQL 18 instance, excluding the

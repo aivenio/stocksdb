@@ -82,6 +82,22 @@ CREATE TABLE IF NOT EXISTS private.option_chain_tx (
             ON UPDATE CASCADE
             ON DELETE RESTRICT,
 
+    -- ? quote prices, sizes, volume, OI, and spot are non-negative;
+    -- ? change_in_open_interest is intentionally unconstrained (it is
+    -- ? legitimately negative when open interest falls)
+    CONSTRAINT ck_option_chain_nonneg CHECK (
+        (last_traded_price IS NULL OR last_traded_price >= 0)
+        AND (bid_price IS NULL OR bid_price >= 0)
+        AND (ask_price IS NULL OR ask_price >= 0)
+        AND (bid_quantity IS NULL OR bid_quantity >= 0)
+        AND (ask_quantity IS NULL OR ask_quantity >= 0)
+        AND (open_interest IS NULL OR open_interest >= 0)
+        AND (volume IS NULL OR volume >= 0)
+        AND (underlying_spot_price IS NULL OR underlying_spot_price >= 0)
+    ),
+
     CONSTRAINT uq_option_chain
         UNIQUE (derivative_contract_id, snapshot_time)
 );
+
+REVOKE INSERT, UPDATE, DELETE ON private.option_chain_tx FROM PUBLIC;

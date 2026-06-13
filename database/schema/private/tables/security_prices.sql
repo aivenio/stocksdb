@@ -66,5 +66,11 @@ CREATE TABLE IF NOT EXISTS private.security_prices_tx (
         AND high_price >= close_price
         AND high_price >= low_price
         AND low_price >= 0
+    ),
+
+    CONSTRAINT ck_security_prices_volume CHECK (
+        volume IS NULL OR volume >= 0
     )
 );
+
+REVOKE INSERT, UPDATE, DELETE ON private.security_prices_tx FROM PUBLIC;

@@ -62,5 +62,12 @@ CREATE TABLE IF NOT EXISTS private.derivative_prices_tx (
         AND high_price >= close_price
         AND high_price >= low_price
         AND low_price >= 0
+    ),
+
+    CONSTRAINT ck_derivative_prices_volume CHECK (
+        (volume IS NULL OR volume >= 0)
+        AND (open_interest IS NULL OR open_interest >= 0)
     )
 );
+
+REVOKE INSERT, UPDATE, DELETE ON private.derivative_prices_tx FROM PUBLIC;
