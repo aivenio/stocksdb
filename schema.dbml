@@ -14,6 +14,27 @@ project stocksdb {
   later phase. **Commodities and currencies (as tradable assets) are strictly
   out of scope.**
 
+  .. versionchanged:: 2026-06-17 Critical Fixes based on Opus 4.8 Review
+    1. [VERY HIGH BUGFIX] Added the three logical-replication PUBLICATIONS that `tradesdb` subscribes
+       to but which this server did **not** previously expose: `stocksdb_securities_table`
+       (`securities_mw` + `securities_exchange_symbol_mw`), `stocksdb_exchange_table`
+       (`stock_exchange_mw`), `stocksdb_derivative_table` (`derivative_contract_mw`). Without these
+       the entire `tradesdb` subscription topology was inert. `wal_level = logical` required.
+    2. [HIGH BUGFIX] Renamed column `scock_exchange_acronym` → `stock_exchange_acronym` on
+       `common.stock_exchange_mw`. Logical replication maps columns **by name**, so this is renamed
+       in lock-step with the `tradesdb` subscriber (see *Migration Notes*).
+    3. [HIGH BUGFIX] Subscriber-side `wikidata_id` widened `varchar(8)` → `varchar(12)` on
+       `country_mw` / `state_mw` / `city_mw`, matching the corrected MacroDB publisher (state/city
+       Q-IDs already exceed 8 chars). `geoname_id` widened to `varchar(12)` for headroom.
+    4. [HIGH FEATURE] `corporate_actions_mw` extended with structured, machine-usable fields so the
+       downstream trading system can adjust historical OHLC: `ex_date`, `record_date`,
+       `ratio_old` / `ratio_new` (splits & bonus), `dividend_amount` + `dividend_currency_code`, and
+       a precomputed `price_adjustment_factor`.
+    5. [MEDIUM ENHANCEMENT] Each `private.*_tx` time-series fact promoted from a constraint-only grain
+       to an explicit composite **PRIMARY KEY** (Timescale-compatible, gives a replica identity if
+       ever published). `stock_exchange_mw` gains `ck_exchange_operational_dates`
+       (`operational_to ≥ operational_from`).
+
   ## Schema Layout
 
   | Schema    | Purpose                                                       |
@@ -39,6 +60,39 @@ project stocksdb {
   |:------------------------------|:----------------------------|:----------------------------------------------------------|
   | `macrodb_currency_reference`  | `macrodb_currency_table`    | `common.currency_mw`                                      |
   | `macrodb_geography_reference` | `macrodb_geography_table`   | `common.country_mw`, `common.state_mw`, `common.city_mw`  |
+
+  ## Logical Replication (Publications to TradesDB)  *(BUGFIX 2026-06-17)*
+
+  This server now also acts as a **publisher** for the algorithmic-trading
+  database (`tradesdb`). `wal_level = logical` is required, and each published
+  table keeps its primary key as the `REPLICA IDENTITY`.
+
+  | Publication                  | Tables                                                          |
+  |:-----------------------------|:----------------------------------------------------------------|
+  | `stocksdb_securities_table`  | `common.securities_mw`, `common.securities_exchange_symbol_mw`  |
+  | `stocksdb_exchange_table`    | `common.stock_exchange_mw`                                      |
+  | `stocksdb_derivative_table`  | `common.derivative_contract_mw`                                |
+
+  Subscriber-side (`tradesdb`) copies **drop all incoming foreign keys** and
+  receive `select`-only privileges. Reference rows referenced by `tradesdb`
+  facts must be **retired logically (never hard-`DELETE`d)** so a replicated
+  tombstone cannot stall the subscriber's `apply` worker against an
+  `ON DELETE RESTRICT` constraint. The MacroDB-origin tables are **not**
+  re-published from here - `tradesdb` subscribes currency directly from MacroDB
+  and does not require the geography hierarchy. See
+  [publication.conf.sql](database/publication.conf.sql).
+
+  ## Migration Notes  *(BUGFIX 2026-06-17 - acronym rename)*
+
+  Because logical replication resolves columns by name, the
+  `scock_exchange_acronym` → `stock_exchange_acronym` rename must be applied as
+  a coordinated, lock-step migration:
+
+  1. On `tradesdb`: `ALTER SUBSCRIPTION stocksdb_exchange_reference DISABLE;`
+  2. On `stocksdb` (publisher): `ALTER TABLE common.stock_exchange_mw RENAME COLUMN scock_exchange_acronym TO stock_exchange_acronym;`
+  3. On `tradesdb` (subscriber): the same `RENAME COLUMN` on its copy.
+  4. On `tradesdb`: `ALTER SUBSCRIPTION stocksdb_exchange_reference ENABLE;` then
+     `ALTER SUBSCRIPTION stocksdb_exchange_reference REFRESH PUBLICATION;`
 
   ## Custom Enum Types (PostgreSQL - Not Representable in DBML Free Tier)
 
@@ -141,8 +195,8 @@ table common.country_mw {
   iso2_code        char(2)      [not null, unique]  // uq_country_iso2
   numeric_code     char(3)      [not null, unique]  // uq_country_numeric_code
   top_level_domain char(3)      [unique]            // uq_country_top_level_domain
-  wikidata_id      varchar(8)   [unique]            // uq_country_wikidata_id
-  geoname_id       varchar(8)   [unique]            // uq_country_geoname_id
+  wikidata_id      varchar(12)  [unique]            // uq_country_wikidata_id · [BUGFIX 2026-06-17] widened 8→12 (matches publisher)
+  geoname_id       varchar(12)  [unique]            // uq_country_geoname_id  · [ENHANCEMENT 2026-06-17] widened 8→12
   country_flag_uri varchar(256) [unique]            // uq_country_flag_uri
 
   note: '''
@@ -154,6 +208,9 @@ table common.country_mw {
 
   Foreign-key constraints to other tables are intentionally omitted to avoid
   load-order failures during replication apply.
+
+  > **[BUGFIX 2026-06-17]** `wikidata_id` / `geoname_id` widened to `varchar(12)` to
+  > match the corrected MacroDB publisher column shape (required for replication apply).
 
   ### Referenced By
 
@@ -171,8 +228,8 @@ table common.state_mw {
   state_type      char(3)
   state_latitude  numeric(9,6)
   state_longitude numeric(9,6)
-  wikidata_id     varchar(8)   [unique]   // uq_state_wikidata_id
-  geoname_id      varchar(8)   [unique]   // uq_state_geoname_id
+  wikidata_id     varchar(12)  [unique]   // uq_state_wikidata_id · [BUGFIX 2026-06-17] widened 8→12
+  geoname_id      varchar(12)  [unique]   // uq_state_geoname_id  · [ENHANCEMENT 2026-06-17] widened 8→12
 
   indexes {
     (country_code, state_name) [unique, name: 'uq_state_name'] // composite: state name unique per country
@@ -208,8 +265,8 @@ table common.city_mw {
   city_type      varchar(32)
   city_latitude  numeric(9,6)
   city_longitude numeric(9,6)
-  wikidata_id    varchar(8)   [unique]   // uq_city_wikidata_id
-  geoname_id     varchar(8)   [unique]   // uq_city_geoname_id
+  wikidata_id    varchar(12)  [unique]   // uq_city_wikidata_id · [BUGFIX 2026-06-17] widened 8→12
+  geoname_id     varchar(12)  [unique]   // uq_city_geoname_id  · [ENHANCEMENT 2026-06-17] widened 8→12
 
   indexes {
     (country_code, state_uuid, city_name) [unique, name: 'uq_city_name'] // composite: city name unique per country-state
@@ -245,7 +302,7 @@ table common.stock_exchange_mw {
   market_identifier_code    char(4)     [pk]                                                         // pk_market_identifier_code
   operating_mic_code        char(4)     [not null]
   legal_exchange_name       varchar(64) [not null]
-  scock_exchange_acronym    varchar(16)
+  stock_exchange_acronym    varchar(16)                                                              // [BUGFIX 2026-06-17] renamed from scock_exchange_acronym (coordinated w/ tradesdb)
   stock_exchange_country_id char(3)     [not null, ref: > common.country_mw.country_code]            // fk_stock_exchange_country_id · on update cascade · on delete restrict
   registered_city_code      char(5)     [ref: > common.city_mw.city_code]                           // fk_stock_exchange_registered_city_code · on update cascade · on delete restrict
   trading_currency_code     char(3)     [not null, ref: > common.currency_mw.currency_code]          // fk_stock_exchange_currency · on update cascade · on delete restrict
@@ -258,7 +315,9 @@ table common.stock_exchange_mw {
   }
 
   note: '''
-  ## Stock Exchange Master (`_mw`)
+  ## Stock Exchange Master (`_mw`) - 📡 **Published** *(BUGFIX 2026-06-17)*
+
+  > **Publication:** `stocksdb_exchange_table` → consumed by `tradesdb`.
 
   ISO 10383 MIC-coded master table of all tracked stock exchanges globally.
   `operating_mic_code` identifies the operating entity (may differ from the MIC
@@ -267,8 +326,9 @@ table common.stock_exchange_mw {
   Each venue is tied to a country and to a single home `trading_currency_code`,
   so prices and contracts on the exchange inherit both geography and denomination.
 
-  > **Note:** The column `scock_exchange_acronym` is a known typo in the DDL
-  > (intended: `stock_exchange_acronym`). Retained here to match the live schema.
+  > **[BUGFIX 2026-06-17]** The column previously mis-spelled `scock_exchange_acronym`
+  > has been corrected to `stock_exchange_acronym`. Apply the rename in lock-step with
+  > the `tradesdb` subscriber (see *Migration Notes* in the project docstring).
 
   ### Parents
 
@@ -281,6 +341,10 @@ table common.stock_exchange_mw {
 
   - `uq_stock_exchange_name`: (`stock_exchange_country_id`, `legal_exchange_name`) -
     Exchange legal name unique per country.
+
+  ### Check Constraints *(ENHANCEMENT 2026-06-17)*
+
+  - `ck_exchange_operational_dates` - `operational_to IS NULL OR operational_to >= operational_from`.
 
   ### Referenced By
 
@@ -312,7 +376,10 @@ table common.securities_mw {
   }
 
   note: '''
-  ## Securities Master (`_mw`)
+  ## Securities Master (`_mw`) - 📡 **Published** *(BUGFIX 2026-06-17)*
+
+  > **Publication:** `stocksdb_securities_table` (with `securities_exchange_symbol_mw`)
+  > → consumed by `tradesdb`.
 
   Global master list of securities identified by 12-character ISIN. Kept intentionally
   minimal to support easy publication and public-domain distribution. Exchange-specific
@@ -321,6 +388,11 @@ table common.securities_mw {
   `security_issuer_type` stores values from the PostgreSQL enum
   `common.security_issue_type` (22 values covering equities, bonds, G-secs, mutual
   funds, REITs, warrants, and more). Represented here as `varchar(64)`.
+
+  > **No-hard-DELETE contract:** a delisted / matured security referenced by a
+  > `tradesdb` fact must be retired via a `corporate_actions_mw` event (e.g.
+  > `DELISTING`), **not** hard-`DELETE`d, so the downstream `apply` worker cannot
+  > stall on an `ON DELETE RESTRICT` FK.
 
   ### Parents
 
@@ -352,7 +424,12 @@ table common.securities_exchange_symbol_mw {
   }
 
   note: '''
-  ## Securities Exchange Symbol Mapping (`_mw`)
+  ## Securities Exchange Symbol Mapping (`_mw`) - 📡 **Published** *(BUGFIX 2026-06-17)*
+
+  > **Publication:** `stocksdb_securities_table` (with `securities_mw`)
+  > → consumed by `tradesdb`. `ses_primary_id` is the equity trading grain of the
+  > whole platform - its identity sequence lives **here** (the publisher); on the
+  > subscriber it is a plain `integer` PK carrying the replicated value.
 
   Bridge table mapping each ISIN to one or more trading symbols across different
   exchanges. A single security (ISIN) can trade under different symbols on NSE,
@@ -378,16 +455,24 @@ table common.securities_exchange_symbol_mw {
 }
 
 table common.corporate_actions_mw {
-  corporate_actions_id          integer      [pk, increment]                                                   // pk_corporate_actions_id · generated always as identity
-  security_isin_code            char(12)     [not null, ref: > common.securities_mw.security_isin_code]        // fk_security_isin_code_corp_action · on update cascade · on delete restrict
-  corporate_actions_type        varchar(64)  [not null]                                                        // enum: common.corporate_actions_type (71 values: IPO, splits, dividends, mergers, etc.)
-  corporate_actions_date        date         [not null]
+  corporate_actions_id          integer       [pk, increment]                                                   // pk_corporate_actions_id · generated always as identity
+  security_isin_code            char(12)      [not null, ref: > common.securities_mw.security_isin_code]        // fk_security_isin_code_corp_action · on update cascade · on delete restrict
+  corporate_actions_type        varchar(64)   [not null]                                                        // enum: common.corporate_actions_type (71 values: IPO, splits, dividends, mergers, etc.)
+  corporate_actions_date        date          [not null]                                                        // primary action / effective date
+  ex_date                       date                                                                            // [FEATURE 2026-06-17] ex-date (trading basis for adjustment)
+  record_date                   date                                                                            // [FEATURE 2026-06-17] record / book-closure date
+  ratio_old                     numeric(21,5)                                                                   // [FEATURE 2026-06-17] split/bonus "old" units (e.g. 1 → split 1:2)
+  ratio_new                     numeric(21,5)                                                                   // [FEATURE 2026-06-17] split/bonus "new" units (e.g. 2 → split 1:2)
+  dividend_amount               numeric(21,5)                                                                   // [FEATURE 2026-06-17] cash dividend per share (>= 0)
+  dividend_currency_code        char(3)       [ref: > common.currency_mw.currency_code]                         // [FEATURE 2026-06-17] fk_ca_dividend_currency · nullable · on update cascade · on delete restrict
+  price_adjustment_factor       numeric(21,10)                                                                  // [FEATURE 2026-06-17] multiplicative factor to back-adjust historical OHLC (> 0)
   corporate_actions_description varchar(255)
-  actions_data_source           varchar(255) [not null]
-  created_on                    timestamptz  [not null, default: `now()`]
+  actions_data_source           varchar(255)  [not null]
+  created_on                    timestamptz   [not null, default: `now()`]
 
   indexes {
     (security_isin_code, corporate_actions_type, corporate_actions_date) [unique, name: 'uq_corporate_actions'] // composite: one action type per security per date
+    (security_isin_code, ex_date) [name: 'ix_corporate_actions_isin_exdate'] // [FEATURE 2026-06-17] adjustment lookups by ex-date
   }
 
   note: '''
@@ -399,14 +484,41 @@ table common.corporate_actions_mw {
   issues), dividends, financial results, governance changes, and regulatory actions.
   Represented here as `varchar(64)`.
 
+  > **[FEATURE 2026-06-17] Structured adjustment fields.** Previously the only payload
+  > was a free-text `corporate_actions_description`, which the trading engine could not
+  > use to back-adjust historical prices. The new structured columns make splits, bonus
+  > issues and dividends machine-usable:
+  >
+  > - `ex_date` / `record_date` - the dates an adjustment is keyed off.
+  > - `ratio_old` / `ratio_new` - capital-change ratio. A 1-for-2 split is
+  >   `ratio_old = 1`, `ratio_new = 2`; a 2-for-1 reverse split is `2` / `1`;
+  >   a 1:1 bonus is `1` / `2` (post-issue total).
+  > - `dividend_amount` + `dividend_currency_code` - cash dividend per share and its
+  >   currency.
+  > - `price_adjustment_factor` - the precomputed multiplicative factor applied to
+  >   pre-`ex_date` OHLC (lets the pipeline persist the canonical factor rather than
+  >   recompute it per consumer).
+  >
+  > This table is **not** part of any publication, so the new columns are local to
+  > `stocksdb` and require no subscriber coordination.
+
   ### Parents
 
   - **`common.securities_mw`** - `fk_security_isin_code_corp_action`
+  - **`common.currency_mw`** - `fk_ca_dividend_currency` (nullable, dividends only) *[FEATURE 2026-06-17]*
 
   ### Composite Unique Constraints
 
   - `uq_corporate_actions`: (`security_isin_code`, `corporate_actions_type`,
     `corporate_actions_date`) - One action type per security per calendar date.
+
+  ### Check Constraints *(FEATURE 2026-06-17)*
+
+  - `ck_ca_ratio_pair` - `NUM_NULLS(ratio_old, ratio_new) IN (0, 2)` and, when set,
+    both `> 0` (split/bonus ratio is all-or-nothing).
+  - `ck_ca_dividend` - a non-NULL `dividend_amount` requires `dividend_amount >= 0`
+    **and** a non-NULL `dividend_currency_code`.
+  - `ck_ca_adj_factor` - `price_adjustment_factor IS NULL OR price_adjustment_factor > 0`.
   '''
 }
 
@@ -447,6 +559,11 @@ table common.market_index_mw {
   - `uq_market_index_symbol`: (`market_identifier_code`, `index_symbol`) -
     Index symbol unique per exchange.
 
+  ### Check Constraints *(ENHANCEMENT 2026-06-17)*
+
+  - `ck_market_index_base` - `base_value IS NULL OR base_value > 0`; a non-NULL
+    `base_value` requires a non-NULL `base_date`.
+
   ### Referenced By
 
   - **`common.derivative_contract_mw`** - `fk_dc_underlying_index`
@@ -475,7 +592,9 @@ table common.derivative_contract_mw {
   }
 
   note: '''
-  ## Derivative Contract Master (`_mw`)
+  ## Derivative Contract Master (`_mw`) - 📡 **Published** *(BUGFIX 2026-06-17)*
+
+  > **Publication:** `stocksdb_derivative_table` → consumed by `tradesdb`.
 
   One row per uniquely tradable option or future contract. Options and futures
   are folded into a single master; the option-only fields (`option_type`,
@@ -532,7 +651,7 @@ table private.security_prices_tx {
   ticker_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]                // fk_sp_data_source · on update cascade · on delete restrict
 
   indexes {
-    (ses_primary_id, timeframe, effective_time) [unique, name: 'uq_security_prices'] // composite: one bar per symbol-timeframe-instant
+    (ses_primary_id, timeframe, effective_time) [pk, name: 'pk_security_prices'] // [ENHANCEMENT 2026-06-17] grain promoted from UNIQUE to PRIMARY KEY (Timescale-compatible)
   }
 
   note: '''
@@ -549,6 +668,11 @@ table private.security_prices_tx {
   `timeframe` stores values from `private.timeframe_value` (represented here as
   `varchar`).
 
+  > **[ENHANCEMENT 2026-06-17]** The grain `(ses_primary_id, timeframe, effective_time)`
+  > is now the table's **PRIMARY KEY** (was a bare `UNIQUE` index). The composite
+  > already includes `effective_time`, so it stays compatible with a future
+  > `create_hypertable(...)` migration.
+
   ### Parents
 
   - **`common.securities_exchange_symbol_mw`** - `fk_sp_exchange_symbol`
@@ -556,8 +680,7 @@ table private.security_prices_tx {
 
   ### Constraints
 
-  - `uq_security_prices`: (`ses_primary_id`, `timeframe`, `effective_time`) -
-    integrity grain (no performance index in this revision).
+  - `pk_security_prices`: (`ses_primary_id`, `timeframe`, `effective_time`) - integrity grain.
   - `ck_security_prices_ohlc` - high is the bar max, low the min, prices ≥ 0.
   - `ck_security_prices_volume` - `volume` ≥ 0 when present.
 
@@ -577,7 +700,7 @@ table private.index_prices_tx {
   index_data_source_id char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_ip_data_source · on update cascade · on delete restrict
 
   indexes {
-    (market_index_id, timeframe, effective_time) [unique, name: 'uq_index_prices'] // composite: one bar per index-timeframe-instant
+    (market_index_id, timeframe, effective_time) [pk, name: 'pk_index_prices'] // [ENHANCEMENT 2026-06-17] grain promoted UNIQUE → PRIMARY KEY
   }
 
   note: '''
@@ -593,7 +716,7 @@ table private.index_prices_tx {
 
   ### Constraints
 
-  - `uq_index_prices`: (`market_index_id`, `timeframe`, `effective_time`).
+  - `pk_index_prices`: (`market_index_id`, `timeframe`, `effective_time`). *[ENHANCEMENT 2026-06-17]*
   - `ck_index_prices_ohlc` / `ck_index_prices_volume` - OHLC ordering and
     non-negativity.
 
@@ -614,7 +737,7 @@ table private.derivative_prices_tx {
   ticker_data_source_id  char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_dp_data_source · on update cascade · on delete restrict
 
   indexes {
-    (derivative_contract_id, timeframe, effective_time) [unique, name: 'uq_derivative_prices'] // composite: one bar per contract-timeframe-instant
+    (derivative_contract_id, timeframe, effective_time) [pk, name: 'pk_derivative_prices'] // [ENHANCEMENT 2026-06-17] grain promoted UNIQUE → PRIMARY KEY
   }
 
   note: '''
@@ -630,7 +753,7 @@ table private.derivative_prices_tx {
 
   ### Constraints
 
-  - `uq_derivative_prices`: (`derivative_contract_id`, `timeframe`, `effective_time`).
+  - `pk_derivative_prices`: (`derivative_contract_id`, `timeframe`, `effective_time`). *[ENHANCEMENT 2026-06-17]*
   - `ck_derivative_prices_ohlc` / `ck_derivative_prices_volume` - OHLC ordering;
     `volume` and `open_interest` non-negative.
 
@@ -659,7 +782,7 @@ table private.option_chain_tx {
   chain_data_source_id    char(5)       [not null, ref: > public.data_source_mw.data_source_id]            // fk_oc_data_source · on update cascade · on delete restrict
 
   indexes {
-    (derivative_contract_id, snapshot_time) [unique, name: 'uq_option_chain'] // composite: one snapshot per contract-instant
+    (derivative_contract_id, snapshot_time) [pk, name: 'pk_option_chain'] // [ENHANCEMENT 2026-06-17] grain promoted UNIQUE → PRIMARY KEY
   }
 
   note: '''
@@ -681,7 +804,7 @@ table private.option_chain_tx {
 
   ### Constraints
 
-  - `uq_option_chain`: (`derivative_contract_id`, `snapshot_time`).
+  - `pk_option_chain`: (`derivative_contract_id`, `snapshot_time`). *[ENHANCEMENT 2026-06-17]*
   - `ck_option_chain_nonneg` - prices, sizes, OI, volume, and spot ≥ 0; greeks and
     `change_in_open_interest` intentionally unconstrained (legitimately negative).
 
